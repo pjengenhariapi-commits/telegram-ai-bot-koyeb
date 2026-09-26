@@ -232,7 +232,11 @@ def process_update(update: dict[str, Any]) -> None:
 
 @web_app.get("/")
 def health() -> Any:
-    return jsonify(status="ok", mode="webhook" if WEBHOOK_BASE_URL else "polling")
+    return jsonify(
+        status="ok",
+        mode="webhook" if WEBHOOK_BASE_URL else "polling",
+        gemini_resilience="retry-and-fallback",
+    )
 
 
 @web_app.post("/telegram-webhook")
