@@ -17,6 +17,7 @@ load_dotenv()
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash")
 WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").rstrip("/")
 if not WEBHOOK_BASE_URL and os.getenv("KOYEB_PUBLIC_DOMAIN"):
@@ -24,10 +25,8 @@ if not WEBHOOK_BASE_URL and os.getenv("KOYEB_PUBLIC_DOMAIN"):
 
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 TELEGRAM_FILE_API = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}"
-GEMINI_API = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    f"{GEMINI_MODEL}:generateContent"
-)
+GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+GEMINI_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 SYSTEM_PROMPT = (
     "Voce e um assistente util em portugues do Brasil dentro do Telegram. "
@@ -126,14 +125,50 @@ def ask_gemini(prompt: str, image: tuple[bytes, str] | None = None) -> str:
         "contents": [{"role": "user", "parts": parts}],
         "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1200},
     }
-    response = requests.post(
-        GEMINI_API,
-        headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
-        json=payload,
-        timeout=90,
-    )
-    response.raise_for_status()
-    data = response.json()
+    models = [GEMINI_MODEL]
+    if GEMINI_FALLBACK_MODEL and GEMINI_FALLBACK_MODEL != GEMINI_MODEL:
+        models.append(GEMINI_FALLBACK_MODEL)
+
+    data: dict[str, Any] | None = None
+    last_error: requests.RequestException | None = None
+    for model in models:
+        for attempt, delay in enumerate((1, 3, 7), start=1):
+            try:
+                response = requests.post(
+                    f"{GEMINI_API_BASE}/{model}:generateContent",
+                    headers={
+                        "x-goog-api-key": GEMINI_API_KEY,
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=90,
+                )
+                if response.ok:
+                    data = response.json()
+                    break
+                response.raise_for_status()
+            except requests.RequestException as exc:
+                last_error = exc
+                status = exc.response.status_code if exc.response is not None else None
+                if status not in GEMINI_RETRYABLE_STATUS:
+                    raise
+                log.warning(
+                    "Gemini indisponivel (modelo=%s, HTTP=%s, tentativa=%s/3)",
+                    model,
+                    status,
+                    attempt,
+                )
+                if attempt < 3:
+                    time.sleep(delay)
+        if data is not None:
+            break
+        log.warning("Tentativas esgotadas para %s; usando modelo reserva", model)
+
+    if data is None:
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("O Gemini nao retornou dados")
+
     candidates = data.get("candidates", [])
     if not candidates:
         return "Nao consegui gerar uma resposta para esse conteudo."
