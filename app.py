@@ -2,6 +2,7 @@ import base64
 import hmac
 import logging
 import os
+import re
 import time
 from threading import Thread
 from typing import Any
@@ -30,9 +31,16 @@ GEMINI_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 SYSTEM_PROMPT = (
     "Voce e um assistente util em portugues do Brasil dentro do Telegram. "
-    "Responda de forma clara e breve. Quando houver resultados de pesquisa, "
-    "baseie-se neles e preserve os links/fontes. Ao receber imagem, descreva "
-    "ou leia o texto conforme o pedido do usuario. Nao invente fatos."
+    "Comece diretamente pela resposta, sem saudacoes como 'Com certeza' e sem "
+    "repetir a pergunta. Escreva de forma natural, clara, objetiva e completa. "
+    "Nao use Markdown: nao escreva hashtags, asteriscos, crases, tabelas, "
+    "colchetes ou links no formato [texto](url). Para organizar, use apenas "
+    "titulos simples, paragrafos curtos e listas numeradas. Evite excesso de "
+    "emojis e simbolos. Quando houver fontes, escreva 'Fontes:' no final e "
+    "coloque cada nome seguido da URL completa em uma linha separada. Nunca "
+    "invente, encurte ou deixe uma URL incompleta. Se nao puder confirmar um "
+    "link, mencione apenas o nome da fonte. Ao receber imagem, descreva ou leia "
+    "o texto conforme o pedido do usuario. Nao invente fatos."
 )
 
 logging.basicConfig(
@@ -123,7 +131,7 @@ def ask_gemini(prompt: str, image: tuple[bytes, str] | None = None) -> str:
     payload = {
         "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"role": "user", "parts": parts}],
-        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1200},
+        "generationConfig": {"temperature": 0.2},
     }
     models = [GEMINI_MODEL]
     if GEMINI_FALLBACK_MODEL and GEMINI_FALLBACK_MODEL != GEMINI_MODEL:
@@ -174,7 +182,17 @@ def ask_gemini(prompt: str, image: tuple[bytes, str] | None = None) -> str:
         return "Nao consegui gerar uma resposta para esse conteudo."
     output_parts = candidates[0].get("content", {}).get("parts", [])
     text = "\n".join(part.get("text", "") for part in output_parts).strip()
-    return text or "Nao consegui gerar uma resposta em texto."
+    return clean_telegram_text(text) or "Nao consegui gerar uma resposta em texto."
+
+
+def clean_telegram_text(text: str) -> str:
+    """Remove marcadores de Markdown que o modelo ainda possa produzir."""
+    text = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", text)
+    text = re.sub(r"\[([^\]]+)]\((https?://[^\s)]+)\)", r"\1\n\2", text)
+    text = re.sub(r"(?m)^\s*[*+-]\s+", "- ", text)
+    text = text.replace("**", "").replace("__", "").replace("`", "")
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def send_long_message(chat_id: int, text: str) -> None:
@@ -236,6 +254,7 @@ def health() -> Any:
         status="ok",
         mode="webhook" if WEBHOOK_BASE_URL else "polling",
         gemini_resilience="retry-and-fallback",
+        response_style="plain-complete-unlimited",
     )
 
 
